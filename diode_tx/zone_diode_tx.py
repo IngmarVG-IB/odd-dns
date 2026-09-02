@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-zone_diode_tx.py -- one-way DNS zone transmitter, high side of an optical
+zone_diode_tx.py -- one-way DNS zone transmitter, low side of an optical
 data diode.
 
-Runs on the trusted network, alongside (or on) the hidden primary BIND
-server. Each cycle it:
+Runs on the untrusted (internet-facing, authoritative) side. Each cycle it:
 
-  1. Obtains the current, authoritative zone content. By default this is a
-     real AXFR pulled from the local BIND instance over 127.0.0.1
-     (--source-mode axfr) -- i.e. it uses BIND's own zone-transfer
-     mechanism as the source of truth, exactly like a normal secondary
-     would, just confined to loopback.
+  1. Obtains the current zone content. By default this is a real AXFR pulled
+     from the local BIND instance over 127.0.0.1 (--source-mode axfr) --
+     i.e. it uses BIND's own zone-transfer mechanism as the source of
+     truth, exactly like a normal secondary would, just confined to
+     loopback. The zone may be authoritative here, or pulled from a remote
+     trusted repository via other means.
   2. Chunks it, wraps every chunk plus a trailing manifest frame in an
      HMAC-authenticated packet (see common/diode_protocol.py), and sends
      them over a UDP socket that is *only ever used to send*.

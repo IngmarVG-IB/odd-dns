@@ -13,16 +13,15 @@ three-way handshake and continuous acknowledgments in *both* directions.
 That is a hard physical incompatibility, not a configuration problem, and
 no amount of BIND tuning fixes it.
 
-What does work, and is what real cross-domain-solution deployments for DNS
-mirroring actually do, is replacing the transport underneath the zone data
-with an application-level, one-way protocol: pull the zone with a real
-AXFR on the trusted side (so BIND's own transfer mechanism is still what
-produces the canonical data), pack it into self-authenticating frames, and
-blast it across the diode over UDP with no return channel at all. The
-receiving side reassembles, verifies, independently re-validates with
-`named-checkzone`, and only then swaps in the new zone file and asks its
-own BIND to reload. From the outside BIND's perspective, it's just an
-ordinary primary zone that happens to update itself.
+What does work is replacing the transport underneath the zone data with an
+application-level, one-way protocol. For the air-gap scenario (HIGH side
+is isolated, LOW side has internet access and is authoritative): the LOW
+side pulls/maintains the zone locally, packs it into self-authenticating
+frames, and blasts it across the LOW→HIGH diode over UDP with no return
+channel at all. The HIGH side reassembles, verifies the HMAC, independently
+re-validates with `named-checkzone` (critical: LOW is untrusted), enforces a
+serial ratchet against rollback, and only then swaps in the zone file and
+asks its own BIND to reload.
 
 This repo implements and tests that approach end-to-end (loopback-tested;
 see [Testing performed](#testing-performed)).
@@ -89,34 +88,35 @@ This repo builds Option B.
 ## Architecture
 
 ```
-   TRUSTED / HIGH SIDE                    │  DIODE  │        UNTRUSTED / LOW SIDE
-   ────────────────────                   │  (TX→RX  │        ─────────────────────
+   UNTRUSTED / LOW SIDE                    │  DIODE   │        TRUSTED / HIGH SIDE
+   (Internet-facing, authoritative)        │ (LOW→HIGH│        (Air-gapped, isolated)
                                            │  only)   │
-   ┌─────────────────────┐                │          │        ┌──────────────────────┐
-   │ named (hidden primary)│               │          │        │ named (public primary)│
-   │  zone: example.com    │◄── AXFR ──┐   │          │        │  zone: example.com    │
-   │  allow-transfer:       │           │   │          │        │  file owned exclusively│
-   │   key txfr-local only  │           │   │          │        │  by zone_diode_rx.py   │
-   │  listen-on: 127.0.0.1  │           │   │          │        └───────────▲────────────┘
-   └─────────────────────┘           │   │          │                    │ rndc reload
-                                       │   │          │                    │ named-checkzone
-   ┌─────────────────────┐           │   │          │        ┌───────────┴────────────┐
-   │ zone_diode_tx.py       │◄──── pull ──┘   │          │        │ zone_diode_rx.py       │
-   │  AXFR over loopback,   │                │          │        │  HMAC-verify each frame│
-   │  HMAC-frame + chunk,   │── UDP, send────►┼─────────►┼───────►│  reassemble, sha256     │
-   │  send-only socket      │   only          │  no return │        │  check, serial ratchet │
-   └─────────────────────┘                │  path exists│       └──────────────────────┘
+   ┌──────────────────────┐                │          │        ┌───────────────────────┐
+   │ named (primary)      │                │          │        │ named (replica)       │
+   │  zone: example.com   │                │          │        │  zone: example.com    │
+   │  authoritative here  │                │          │        │  file owned exclusively│
+   │  listen-on: any      │                │          │        │  by zone_diode_rx.py   │
+   │  allow-transfer: any │                │          │        │  listen-on: 127.0.0.1 │
+   └──────────┬───────────┘                │          │        └───────────▲────────────┘
+              │ (local pull or remote fetch)          │                    │ rndc reload
+   ┌──────────▼───────────┐                │          │                    │ named-checkzone
+   │ zone_diode_tx.py     │                │          │        ┌───────────┴────────────┐
+   │  pull zone from local│                │          │        │ zone_diode_rx.py       │
+   │  BIND (loopback AXFR)│                │          │        │  HMAC-verify each frame│
+   │  HMAC-frame + chunk, │── UDP, send───►├─────────►├───────►│  reassemble, sha256    │
+   │  send-only socket    │   only         │  no return        │  check, serial ratchet │
+   └──────────────────────┘                │  path exists       └────────────────────────┘
 ```
 
 - The **only** thing that ever crosses the diode is the UDP frame stream
   from `zone_diode_tx.py` to `zone_diode_rx.py`.
-- The hidden primary is not even reachable from the diode-facing network —
-  `zone_diode_tx.py` pulls from it over loopback, and the diode-facing UDP
-  socket it uses to send is never bound to receive and never calls
-  `recv()`. That's enforced in code, on top of whatever the diode hardware
-  itself enforces.
-- `zone_diode_rx.py`'s socket is receive-only in the same sense: it never
-  calls `sendto()`.
+- The LOW side has zone authority and can reach the internet/trusted
+  repositories to update it. `zone_diode_tx.py` pulls from its own BIND
+  over loopback, and the diode-facing UDP socket it uses to send is never
+  bound to receive and never calls `recv()`. That's enforced in code.
+- `zone_diode_rx.py` (on the HIGH/trusted side) only ever calls `recv()` —
+  it never sends. This is critical: the HIGH side cannot send any signal
+  back, and the diode hardware enforces it. The software just doesn't try.
 
 ## Wire protocol
 
@@ -161,19 +161,21 @@ another chance.
   diode can't carry — but it serves the same purpose for this transport:
   a frame that doesn't carry a valid MAC is dropped before anything else
   is done with it.
-- **Serial ratchet.** The receiver persists the last serial it installed
-  (`--state-file`) and refuses anything older, which blocks replay of a
-  captured older cycle or an accidental rollback. It also refuses to
-  *reinstall* if the same serial ever shows up with a different hash than
-  what's already live — that combination should never happen legitimately
-  (a real content change always bumps the serial) and is treated as a
-  corruption/spoofing signal, logged, and rejected.
+- **Serial ratchet.** The receiver (on the trusted HIGH side) persists the
+  last serial it installed (`--state-file`) and refuses anything older,
+  which blocks replay of a captured older cycle or an accidental rollback.
+  This is critical: the LOW side is untrusted, so preventing a compromised
+  transmitter from replaying an old (potentially exploited) version of the
+  zone is essential. The receiver also refuses to *reinstall* if the same
+  serial ever shows up with a different hash — that's a corruption/spoofing
+  signal, logged, and rejected.
 - **Independent validation before install.** Even though the HMAC already
   authenticates the sender, `named-checkzone` is run against the
-  reassembled zone before it ever touches the live file. This turns "a bug
-  in our own tx pipeline (or a compromised tx host) produces malformed
-  zone data" into "the low side rejects it and keeps serving the last-good
-  zone," instead of a crash or an inconsistent zone load.
+  reassembled zone before it ever touches the live file on the HIGH side.
+  This is critical: the LOW side is untrusted. Validation before install
+  means "a bug in the LOW-side tx pipeline, or a compromised LOW-side host,
+  produces malformed zone data" is turned into "the HIGH side rejects it and
+  keeps serving the last-good zone," instead of a crash or inconsistent zone.
 - **Atomic install.** The new zone is written to a temp file next to the
   target and `os.replace()`'d into place — `named` never observes a
   partially-written file.
@@ -187,19 +189,44 @@ no signing configuration at all. The private KSK/ZSK material has no
 reason to ever leave the high side, diode included. That's a nice
 alignment between the diode's own trust boundary and DNSSEC's.
 
+## Air-gap scenario and threat model
+
+**The setup:** LOW side (untrusted, has internet) is authoritative for
+the zone and can fetch/update it from a trusted repository. HIGH side
+(trusted, air-gapped, cannot reach internet) needs the zone but has no
+return channel to request it.
+
+**Why this matters:**
+- LOW side can be compromised by internet-facing attackers.
+- HIGH side is isolated, but it cannot tell if what LOW sends is current
+  or stale (no way to query "what's your current serial?").
+- HIGH side's only defense is validation: HMAC verification, serial
+  ratchet (reject rollback), and independent zone syntax checking.
+
+The **serial ratchet** is especially critical here: if a compromised LOW
+side tries to replay an old (perhaps exploited) version of the zone, HIGH
+rejects it because the serial is lower than what's installed. Combined
+with independent `named-checkzone` validation, this prevents LOW from
+rolling back HIGH's security posture.
+
 ## No feedback channel, by design
 
-This is the one thing worth being explicit about rather than papering
-over: **the high side can never know whether the low side received
-anything.** That's not a gap in this implementation, it's the diode doing
-its job. Operational consequences:
+**The diode is one-way: LOW→HIGH only.** This is the one thing worth being
+explicit about rather than papering over: **the LOW side can never know
+whether the HIGH side received anything.** That's not a gap in this
+implementation, it's the diode doing its job.
 
-- Monitor both sides independently. On the low side, alert if
+Operational consequences:
+
+- Monitor both sides independently. On the HIGH side, alert if
   `zone_diode_rx.py` hasn't logged a verified cycle in longer than a few
-  multiples of `--interval`. On the high side, alert on any AXFR-pull or
+  multiples of `--interval`. On the LOW side, alert on any AXFR-pull or
   send failure. Neither side can infer the other's health from the wire.
 - Don't build anything on this path that assumes eventual acknowledgment.
   The carousel exists specifically so correctness doesn't depend on one.
+- The LOW side cannot verify whether HIGH installed a particular cycle
+  (that's fine: LOW is untrusted anyway). HIGH will install whatever it
+  receives that passes validation.
 
 ## Repo layout
 

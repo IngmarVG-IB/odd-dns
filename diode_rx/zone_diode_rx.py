@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-zone_diode_rx.py -- one-way DNS zone receiver, low side of an optical data
-diode.
+zone_diode_rx.py -- one-way DNS zone receiver, high side (trusted) of an
+optical data diode.
 
 This process only ever calls recvfrom() on its diode-facing socket -- it
 never calls sendto(). It reassembles the chunk/manifest carousel produced
-by zone_diode_tx.py, verifies each frame's HMAC and the reassembled zone's
-SHA-256 against the manifest, rejects any serial older than the last one it
-installed (anti-rollback/anti-replay), independently re-validates the zone
-syntax with `named-checkzone` before touching anything on disk, and only
-then atomically replaces the live zone file and asks the local BIND
-instance to reload it.
+by zone_diode_tx.py (running on the LOW/untrusted side), verifies each
+frame's HMAC and the reassembled zone's SHA-256 against the manifest,
+rejects any serial older than the last one it installed (anti-rollback/
+anti-replay), independently re-validates the zone syntax with
+`named-checkzone` before touching anything on disk (critical: LOW is
+untrusted), and only then atomically replaces the live zone file and asks
+the local BIND instance to reload it.
 
 There is no channel back to the transmit side. Whether fresh cycles are
 still arriving has to be monitored independently on this host -- see

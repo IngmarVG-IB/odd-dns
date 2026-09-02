@@ -1,29 +1,31 @@
-// Hidden primary for example.com, on the trusted ("high") side of the
-// optical data diode.
+// Primary authoritative server for example.com, on the LOW (untrusted,
+// internet-facing) side of the optical data diode.
 //
-// This named instance is never intended to be reachable from the low side
-// at all. The only thing that ever leaves this host is the one-way UDP
-// carousel produced by diode_tx/zone_diode_tx.py, and that stream is
-// derived from a *local* AXFR pulled over loopback (see the "txfr-local"
-// key below). No listen-on address here should ever be routable to the
-// low-side network -- if this host somehow acquires a second interface
-// facing the diode network, that fact alone is a finding, not a feature.
+// This is the authoritative source for the zone. It serves queries from
+// the internet (or wherever the zone needs to be authoritative), and the
+// ONLY thing that ever leaves this host toward the diode is the one-way
+// UDP carousel produced by diode_tx/zone_diode_tx.py, derived from a
+// *local* AXFR pulled over loopback (see the "txfr-local" key below).
+//
+// This configuration assumes the zone is sourced/maintained locally on
+// this host (e.g., managed via RNDC or dynamically updated). If the zone
+// is pulled from a remote trusted repository, adjust accordingly.
 
 options {
-    directory "/var/lib/bind/inside";
+    directory "/var/lib/bind/low";
 
-    listen-on { 127.0.0.1; };      // loopback only
-    listen-on-v6 { none; };
+    listen-on { any; };            // authoritative server, serves internet queries
+    listen-on-v6 { any; };
 
-    allow-query { localhost; };
+    allow-query { any; };
     allow-transfer { none; };       // deny by default; overridden per-zone below
     allow-recursion { none; };
     recursion no;
 
-    notify no;                      // no real secondaries are reachable from here
+    notify yes;                     // notify any real secondaries if configured
 };
 
-// Used solely so diode_tx can pull a real AXFR from this master over
+// Used solely so diode_tx can pull a real AXFR from this primary over
 // 127.0.0.1. Never crosses the diode, never needs to be known outside this
 // host. Generate with:  tsig-keygen txfr-local
 key "txfr-local" {
@@ -35,11 +37,11 @@ zone "example.com" {
     type primary;
     file "zones/db.example.com";
     allow-transfer { key "txfr-local"; };  // only the local diode-tx process, over loopback
-    allow-update { none; };
+    allow-update { none; };                // update via other means if needed, but not from network
 };
 
 // If the zone is DNSSEC-signed, sign it here (inline-signing or offline
 // dnssec-signzone) so that only already-signed, already-canonicalized zone
-// content is ever handed to diode_tx. The private KSK/ZSK material then
-// never has a reason to leave this host, diode included -- the outside
-// primary only ever serves static, pre-signed RRSIGs.
+// content is ever handed to diode_tx. The private KSK/ZSK material stays
+// on the LOW side (which is fine, it's authoritative there anyway), and
+// the HIGH-side replica only ever serves the static signed RRSIGs.
