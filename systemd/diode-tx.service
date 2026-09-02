@@ -1,0 +1,27 @@
+[Unit]
+Description=One-way DNS zone transmitter (diode TX, high side)
+After=network.target bind9.service named.service
+Wants=bind9.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/odd-dns/diode_tx/zone_diode_tx.py \
+    --zone example.com \
+    --dest-host 10.99.0.2 --dest-port 5390 \
+    --key-file /etc/odd-dns/diode.key \
+    --source-mode axfr \
+    --axfr-server 127.0.0.1 --axfr-keyname txfr-local \
+    --axfr-secret-file /etc/odd-dns/txfr-local.secret \
+    --interval 300 --poll-interval 10 --repeats 3 --pacing-ms 5
+Restart=always
+RestartSec=5
+
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/etc/odd-dns
+
+[Install]
+WantedBy=multi-user.target

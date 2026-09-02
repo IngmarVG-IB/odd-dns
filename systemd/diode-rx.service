@@ -1,0 +1,33 @@
+[Unit]
+Description=One-way DNS zone receiver (diode RX, low side)
+After=network.target bind9.service named.service
+Wants=bind9.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/odd-dns/diode_rx/zone_diode_rx.py \
+    --zone example.com \
+    --listen-host 10.99.0.2 --listen-port 5390 \
+    --key-file /etc/odd-dns/diode.key \
+    --zone-file /var/lib/bind/outside/zones/db.example.com \
+    --state-file /var/lib/odd-dns/rx-state.json
+
+Restart=always
+RestartSec=5
+
+# Needs write access to the BIND zone file and permission to run `rndc
+# reload`. Simplest correct setup: run as the same user/group BIND runs as
+# (commonly `bind`), and grant that account an rndc key scoped to `reload`
+# only (rndc.conf / named.conf controls key {} { ... }; do not hand this
+# service a key with `stop`/`halt`/full control). DynamicUser is
+# intentionally NOT used here, unlike diode-tx, because this side needs a
+# stable, pre-authorized identity against BIND's rndc ACL.
+User=bind
+Group=bind
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bind/outside/zones /var/lib/odd-dns
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+This directory is intentionally empty in version control.
+
+zone_diode_rx.py owns db.example.com in this directory exclusively -- it is
+written here only by the receiver process, atomically, after HMAC/hash
+verification and named-checkzone validation. Nothing else should ever write
+to this directory on the real outside host.

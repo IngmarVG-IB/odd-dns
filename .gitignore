@@ -1,0 +1,8 @@
+secrets/*.key
+secrets/*.secret
+__pycache__/
+*.pyc
+bind/outside/zones/db.*
+!bind/outside/zones/.gitkeep
+*.incoming
+rx-state.json

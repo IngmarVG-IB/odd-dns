@@ -1,0 +1,24 @@
+// Public-facing primary for example.com, on the untrusted ("low") side of
+// the diode.
+//
+// zones/db.example.com is NOT hand-edited and NOT managed by any dynamic
+// update or AXFR-pull mechanism on this host -- it is overwritten in place,
+// atomically, exclusively by diode_rx/zone_diode_rx.py. From BIND's point
+// of view this is a perfectly ordinary primary zone; it has no idea the
+// data arrived over a one-way link, and it does not need to.
+
+options {
+    directory "/var/lib/bind/outside";
+
+    listen-on { any; };
+    allow-query { any; };
+    allow-transfer { any; };  // fine to let this host AXFR onward to its own secondaries
+    recursion no;
+};
+
+zone "example.com" {
+    type primary;
+    file "zones/db.example.com";
+    allow-update { none; };   // never accept dynamic updates -- zone_diode_rx.py owns this file exclusively
+    notify yes;                // fine to NOTIFY this host's own downstream secondaries after each rndc reload
+};
